@@ -31,12 +31,12 @@ function createRpcSubscriptionResult<T, U>(result: Struct<T, U>) {
     }),
     pick({
       jsonrpc: literal('2.0'),
-      id: string(),
+      id: number(),
       result: number(),
     }),
     pick({
       jsonrpc: literal('2.0'),
-      id: string(),
+      id: number(),
       error: pick({
         code: unknown(),
         message: string(),
