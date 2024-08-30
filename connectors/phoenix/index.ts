@@ -32,12 +32,19 @@ export default class ArchitectPhoenixConnector {
     newSymbology.routes.push(route)
     newSymbology.venues.push(venue)
     for (const [pubkey, config] of this.phoenix.marketConfigs) {
+      // TODO: configurable symbology remaps e.g. $WIF -> WIF, Bonk -> BONK
+      let baseSymbol = config.baseToken.symbol
+      if (baseSymbol == '$WIF') {
+        baseSymbol = 'WIF'
+      } else if (baseSymbol == 'Bonk') {
+        baseSymbol = 'BONK'
+      }
       const base = new Product({
-        name: `${config.baseToken.name} Crypto`,
+        name: `${baseSymbol} Crypto`,
         kind: { type: 'Coin', value: { token_info: {} } },
       })
       const quote = new Product({
-        name: `${config.quoteToken.name} Crypto`,
+        name: `${config.quoteToken.symbol} Crypto`,
         kind: { type: 'Coin', value: { token_info: {} } },
       })
       newSymbology.products.push(base)
@@ -50,7 +57,7 @@ export default class ArchitectPhoenixConnector {
       const tickSize = Big(meta.quoteAtomsToQuoteUnits(meta.tickSizeInQuoteAtomsPerBaseUnit))
       const stepSize = Big(meta.baseAtomsToRawBaseUnits(meta.baseLotSize))
       const market = new Market({
-        name: `${config.baseToken.name}/${config.quoteToken.name}*PHOENIX/DIRECT`,
+        name: `${base.name}/${quote.name}*PHOENIX/DIRECT`,
         base,
         quote,
         venue,
