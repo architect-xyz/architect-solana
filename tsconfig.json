@@ -22,6 +22,14 @@
     // Some stricter flags
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noPropertyAccessFromIndexSignature": true
+    "noPropertyAccessFromIndexSignature": true,
+
+    // Project path roots
+    "baseUrl": ".",
+    "paths": {
+      "@": ["./index.ts"],
+      "@/architect": ["./architect"],
+      "@/connectors": ["./connectors"],
+    }
   }
 }

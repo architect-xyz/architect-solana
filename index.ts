@@ -1,22 +1,44 @@
+import 'dotenv/config'
+import pino from 'pino'
+import { parseArgs } from 'util'
+import { create } from 'superstruct'
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js'
 import { Helius } from 'helius-sdk'
 import * as Phoenix from '@ellipsis-labs/phoenix-sdk'
 import type { bignum } from '@metaplex-foundation/beet'
-import 'dotenv/config'
-import { create } from 'superstruct'
-import { TransactionSubscriptionNotification } from './types.ts'
-import { eq, gt, lte } from './utils.ts'
-import { RingBuffer } from './RingBuffer.ts'
 import BN from 'bn.js'
 import { toNum } from '@ellipsis-labs/phoenix-sdk'
+import { eq, lte } from './utils.ts'
+import { RingBuffer } from './RingBuffer.ts'
+import { TransactionSubscriptionNotification } from './types.ts'
+import { ProtocolMessage } from './architect'
+import ArchitectPhoenixConnector from './connectors/phoenix'
 
 const WSS_ENDPOINT = process.env['WSS_ENDPOINT']!
 const HTTP_ENDPOINT = process.env['HTTP_ENDPOINT']!
 const HELIUS_API_KEY = process.env['HELIUS_API_KEY']!
 const MARKET_PUBKEY = new PublicKey('4DoNfFBfF7UokCC2FQzriy7yHK6DY6NVdYpuekQ5pRgg')
 
+const args = parseArgs({
+  args: Bun.argv,
+  options: {
+    host: { type: 'string', short: 'h', default: 'localhost' },
+    port: { type: 'string', short: 'p', default: '8888' },
+  },
+  allowPositionals: true,
+})
+
+export const logger = pino({
+  name: 'architect-solana',
+  level: 'debug',
+  // TODO: only for dev
+  transport: {
+    target: 'pino-pretty',
+  },
+})
+
 const solana = new Connection(HTTP_ENDPOINT, { wsEndpoint: WSS_ENDPOINT })
-const phoenix = await Phoenix.Client.create(solana)
+const phoenix = await ArchitectPhoenixConnector.create(solana)
 
 const BUFFER: RingBuffer<Phoenix.PhoenixEventsFromInstruction> = new RingBuffer(1000)
 let SYNCED = false
@@ -254,7 +276,57 @@ function applyMarketUpdates() {
   SYNCED = true
 }
 
-streamMarketEvents()
-setTimeout(syncMarket, 1000)
+// streamMarketEvents()
+// setTimeout(syncMarket, 1000)
 
-await new Promise(() => {})
+const port = parseInt(args.values.port ?? '8888')
+
+logger.info(`listening on ${args.values.host}:${port}...`)
+
+Bun.serve({
+  hostname: args.values.host,
+  port: parseInt(args.values.port ?? '8888'),
+  fetch(req, server) {
+    // upgrade the request to a WebSocket
+    if (server.upgrade(req)) {
+      return // do not return a Response
+    }
+    return new Response('Upgrade failed', { status: 500 })
+  },
+  websocket: {
+    message(ws, message) {
+      if (typeof message !== 'string') {
+        return
+      }
+      try {
+        const unsafeJson = JSON.parse(message)
+        const parsed = create(unsafeJson, ProtocolMessage)
+        if (parsed.type == 'query') {
+          logger.info(`received query: ${parsed.method}`)
+          switch (parsed.method) {
+            case 'symbology/snapshot':
+              ws.send(
+                JSON.stringify({
+                  type: 'response',
+                  id: parsed.id,
+                  result: phoenix.symbology,
+                })
+              )
+              break
+            default:
+              ws.send(
+                JSON.stringify({
+                  type: 'response',
+                  id: parsed.id,
+                  error: { code: -32601, message: 'method not found' },
+                })
+              )
+              break
+          }
+        }
+      } catch (err) {
+        logger.error(`while handling ws message: ${err}`)
+      }
+    },
+  },
+})
