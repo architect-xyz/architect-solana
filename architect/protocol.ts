@@ -25,6 +25,27 @@ export const ProtocolResponseMessage = object({
 
 export type ProtocolResponseMessage = Infer<typeof ProtocolResponseMessage>
 
-export const ProtocolMessage = union([ProtocolQueryMessage, ProtocolResponseMessage])
+export const ProtocolSubscribeMessage = object({
+  type: literal('subscribe'),
+  id: number(),
+  topic: string(),
+})
+
+export type ProtocolSubscribeMessage = Infer<typeof ProtocolSubscribeMessage>
+
+export const ProtocolUpdateMessage = object({
+  type: literal('update'),
+  id: number(),
+  data: unknown(),
+})
+
+export type ProtocolUpdateMessage = Infer<typeof ProtocolUpdateMessage>
+
+export const ProtocolMessage = union([
+  ProtocolQueryMessage,
+  ProtocolResponseMessage,
+  ProtocolSubscribeMessage,
+  ProtocolUpdateMessage,
+])
 
 export type ProtocolMessage = Infer<typeof ProtocolMessage>

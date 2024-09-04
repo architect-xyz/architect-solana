@@ -1,9 +1,7 @@
-import Big from 'big.js'
 import {
   array,
   boolean,
   coerce,
-  date,
   type Infer,
   instance,
   literal,
@@ -16,16 +14,9 @@ import {
   unknown,
 } from 'superstruct'
 import * as uuid from 'uuid'
+import { Decimal, DateTime } from './common'
 
 // TODO: flip from Infer to Define, makes type hinting cleaner
-
-export const Decimal = coerce(instance(Big), string(), (value) => Big(value))
-
-export type Decimal = Infer<typeof Decimal>
-
-export const DateTime = coerce(date(), string(), (value) => new Date(value))
-
-export type DateTime = Infer<typeof DateTime>
 
 const ROUTE_NS = uuid.parse('0cadbcc5-98bc-4888-94ba-fbbcb6f39132')
 

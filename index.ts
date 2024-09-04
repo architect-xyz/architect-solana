@@ -2,17 +2,16 @@ import 'dotenv/config'
 import pino from 'pino'
 import { parseArgs } from 'util'
 import { create } from 'superstruct'
-import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js'
-import { Helius } from 'helius-sdk'
+import { Connection, PublicKey } from '@solana/web3.js'
 import * as Phoenix from '@ellipsis-labs/phoenix-sdk'
 import type { bignum } from '@metaplex-foundation/beet'
 import BN from 'bn.js'
 import { toNum } from '@ellipsis-labs/phoenix-sdk'
-import { eq, lte } from './utils.ts'
 import { RingBuffer } from './RingBuffer.ts'
 import { TransactionSubscriptionNotification } from './types.ts'
-import { ProtocolMessage } from './architect'
+import { ProtocolMessage, QueryL2BookSnapshot } from './architect'
 import ArchitectPhoenixConnector from './connectors/phoenix'
+import SubscriptionBroker from './SubscriptionBroker.ts'
 
 const WSS_ENDPOINT = process.env['WSS_ENDPOINT']!
 const HTTP_ENDPOINT = process.env['HTTP_ENDPOINT']!
@@ -37,13 +36,14 @@ export const logger = pino({
   },
 })
 
+const broker = new SubscriptionBroker()
+
 const solana = new Connection(HTTP_ENDPOINT, { wsEndpoint: WSS_ENDPOINT })
-const phoenix = await ArchitectPhoenixConnector.create(solana)
+const phoenix = await ArchitectPhoenixConnector.create(solana, HELIUS_API_KEY, broker)
 
 const BUFFER: RingBuffer<Phoenix.PhoenixEventsFromInstruction> = new RingBuffer(1000)
 let SYNCED = false
 let STATE: Phoenix.MarketState
-let MSN: bignum
 let ORDERS: Map<string, [bignum, bignum]> = new Map() // orderSequenceNumber.toString() => [priceInTicks, baseLots]
 
 function printOrderBook() {
@@ -149,132 +149,116 @@ function streamMarketEvents() {
   })
 }
 
-async function syncMarket() {
-  SYNCED = false
-  STATE = await phoenix.refreshMarket(MARKET_PUBKEY)
-  MSN = STATE.data.header.marketSequenceNumber
-  ORDERS.clear()
-  // TODO: useful to read off the maker pubkey
-  // TODO: keep lastValidSlot and lastValidUnixTimestamp around
-  for (const [oid, order] of STATE.data.bids) {
-    ORDERS.set(oid.orderSequenceNumber.toString(), [oid.priceInTicks, order.numBaseLots])
-  }
-  for (const [oid, order] of STATE.data.asks) {
-    ORDERS.set(oid.orderSequenceNumber.toString(), [oid.priceInTicks, order.numBaseLots])
-  }
-  SYNCED = true
-}
-
-function applyMarketUpdates() {
-  SYNCED = false
-  while (!BUFFER.isEmpty()) {
-    const ix = BUFFER.removeFirst()
-    if (lte(ix.header.sequenceNumber, MSN)) {
-      continue
-    }
-    const MSN_PLUS_ONE = new BN(MSN).addn(1)
-    if (!eq(ix.header.sequenceNumber, MSN_PLUS_ONE)) {
-      // gap, need to resync
-      throw new Error(`gap detected: expected ${MSN_PLUS_ONE}, got ${ix.header.sequenceNumber}`)
-    }
-    MSN = ix.header.sequenceNumber
-    for (const ev of ix.events) {
-      switch (ev.__kind) {
-        case 'Fill':
-          for (const f of ev.fields) {
-            // console.log(
-            //   ` ->FILL ${f.orderSequenceNumber} baseLots=${f.baseLotsFilled} price=${f.priceInTicks}`
-            // )
-            const osn = f.orderSequenceNumber.toString()
-            if (eq(f.baseLotsRemaining, 0)) {
-              ORDERS.delete(osn)
-            } else {
-              ORDERS.set(osn, [f.priceInTicks, f.baseLotsRemaining])
-            }
-          }
-          break
-        case 'FillSummary':
-          break
-        case 'Fee':
-          break
-        case 'ExpiredOrder':
-          for (const f of ev.fields) {
-            // console.log(
-            //   ` ->EXPIRE ${f.orderSequenceNumber} baseLots=${f.baseLotsRemoved} price=${f.priceInTicks}`
-            // )
-            const osn = f.orderSequenceNumber.toString()
-            const entry = ORDERS.get(osn)
-            if (entry) {
-              const [priceInTicks, baseLots] = entry
-              if (!eq(priceInTicks, f.priceInTicks) || !eq(baseLots, f.baseLotsRemoved)) {
-                const expected = [f.priceInTicks, f.baseLotsRemoved]
-                console.error(` ! mismatch: expected [${expected}], $[, but entry was ${entry}`)
-              }
-            }
-            ORDERS.delete(osn)
-          }
-          break
-        case 'Evict':
-          for (const f of ev.fields) {
-            // console.log(
-            //   ` ->EVICT ${f.orderSequenceNumber} baseLots=${f.baseLotsEvicted} price=${f.priceInTicks}`
-            // )
-            const osn = f.orderSequenceNumber.toString()
-            const entry = ORDERS.get(osn)
-            if (entry) {
-              const [priceInTicks, baseLots] = entry
-              if (!eq(priceInTicks, f.priceInTicks) || !eq(baseLots, f.baseLotsEvicted)) {
-                const expected = [f.priceInTicks, f.baseLotsEvicted]
-                console.error(` ! mismatch: expected [${expected}], $[, but entry was ${entry}`)
-              }
-            }
-            ORDERS.delete(osn)
-          }
-          break
-        case 'Header':
-          break
-        case 'Place':
-          for (const f of ev.fields) {
-            // console.log(
-            //   ` ->PLACE ${f.orderSequenceNumber} baseLots=${f.baseLotsPlaced} price=${f.priceInTicks}`
-            // )
-            const osn = f.orderSequenceNumber.toString()
-            if (!eq(f.baseLotsPlaced, 0)) {
-              ORDERS.set(osn, [f.priceInTicks, f.baseLotsPlaced])
-            }
-          }
-          break
-        case 'Reduce':
-          for (const f of ev.fields) {
-            // console.log(
-            //   ` ->REDUCE ${f.orderSequenceNumber} baseLots=${f.baseLotsRemoved} price=${f.priceInTicks}`
-            // )
-            const osn = f.orderSequenceNumber.toString()
-            const entry = ORDERS.get(osn)
-            if (entry) {
-              const [priceInTicks, baseLots] = entry
-              if (!eq(priceInTicks, f.priceInTicks) || !eq(baseLots, f.baseLotsRemoved)) {
-                const expected = [f.priceInTicks, f.baseLotsRemoved]
-                console.error(` ! mismatch: expected [${expected}], but entry was ${entry}`)
-              }
-            }
-            if (eq(f.baseLotsRemaining, 0)) {
-              ORDERS.delete(osn)
-            } else {
-              ORDERS.set(osn, [f.priceInTicks, f.baseLotsRemaining])
-            }
-          }
-          break
-        case 'TimeInForce':
-          break
-        case 'Uninitialized':
-          break
-      }
-    }
-  }
-  printOrderBook()
-  SYNCED = true
-}
+// function applyMarketUpdates() {
+//   SYNCED = false
+//   while (!BUFFER.isEmpty()) {
+//     const ix = BUFFER.removeFirst()
+//     if (lte(ix.header.sequenceNumber, MSN)) {
+//       continue
+//     }
+//     const MSN_PLUS_ONE = new BN(MSN).addn(1)
+//     if (!eq(ix.header.sequenceNumber, MSN_PLUS_ONE)) {
+//       // gap, need to resync
+//       throw new Error(`gap detected: expected ${MSN_PLUS_ONE}, got ${ix.header.sequenceNumber}`)
+//     }
+//     MSN = ix.header.sequenceNumber
+//     for (const ev of ix.events) {
+//       switch (ev.__kind) {
+//         case 'Fill':
+//           for (const f of ev.fields) {
+//             // console.log(
+//             //   ` ->FILL ${f.orderSequenceNumber} baseLots=${f.baseLotsFilled} price=${f.priceInTicks}`
+//             // )
+//             const osn = f.orderSequenceNumber.toString()
+//             if (eq(f.baseLotsRemaining, 0)) {
+//               ORDERS.delete(osn)
+//             } else {
+//               ORDERS.set(osn, [f.priceInTicks, f.baseLotsRemaining])
+//             }
+//           }
+//           break
+//         case 'FillSummary':
+//           break
+//         case 'Fee':
+//           break
+//         case 'ExpiredOrder':
+//           for (const f of ev.fields) {
+//             // console.log(
+//             //   ` ->EXPIRE ${f.orderSequenceNumber} baseLots=${f.baseLotsRemoved} price=${f.priceInTicks}`
+//             // )
+//             const osn = f.orderSequenceNumber.toString()
+//             const entry = ORDERS.get(osn)
+//             if (entry) {
+//               const [priceInTicks, baseLots] = entry
+//               if (!eq(priceInTicks, f.priceInTicks) || !eq(baseLots, f.baseLotsRemoved)) {
+//                 const expected = [f.priceInTicks, f.baseLotsRemoved]
+//                 console.error(` ! mismatch: expected [${expected}], $[, but entry was ${entry}`)
+//               }
+//             }
+//             ORDERS.delete(osn)
+//           }
+//           break
+//         case 'Evict':
+//           for (const f of ev.fields) {
+//             // console.log(
+//             //   ` ->EVICT ${f.orderSequenceNumber} baseLots=${f.baseLotsEvicted} price=${f.priceInTicks}`
+//             // )
+//             const osn = f.orderSequenceNumber.toString()
+//             const entry = ORDERS.get(osn)
+//             if (entry) {
+//               const [priceInTicks, baseLots] = entry
+//               if (!eq(priceInTicks, f.priceInTicks) || !eq(baseLots, f.baseLotsEvicted)) {
+//                 const expected = [f.priceInTicks, f.baseLotsEvicted]
+//                 console.error(` ! mismatch: expected [${expected}], $[, but entry was ${entry}`)
+//               }
+//             }
+//             ORDERS.delete(osn)
+//           }
+//           break
+//         case 'Header':
+//           break
+//         case 'Place':
+//           for (const f of ev.fields) {
+//             // console.log(
+//             //   ` ->PLACE ${f.orderSequenceNumber} baseLots=${f.baseLotsPlaced} price=${f.priceInTicks}`
+//             // )
+//             const osn = f.orderSequenceNumber.toString()
+//             if (!eq(f.baseLotsPlaced, 0)) {
+//               ORDERS.set(osn, [f.priceInTicks, f.baseLotsPlaced])
+//             }
+//           }
+//           break
+//         case 'Reduce':
+//           for (const f of ev.fields) {
+//             // console.log(
+//             //   ` ->REDUCE ${f.orderSequenceNumber} baseLots=${f.baseLotsRemoved} price=${f.priceInTicks}`
+//             // )
+//             const osn = f.orderSequenceNumber.toString()
+//             const entry = ORDERS.get(osn)
+//             if (entry) {
+//               const [priceInTicks, baseLots] = entry
+//               if (!eq(priceInTicks, f.priceInTicks) || !eq(baseLots, f.baseLotsRemoved)) {
+//                 const expected = [f.priceInTicks, f.baseLotsRemoved]
+//                 console.error(` ! mismatch: expected [${expected}], but entry was ${entry}`)
+//               }
+//             }
+//             if (eq(f.baseLotsRemaining, 0)) {
+//               ORDERS.delete(osn)
+//             } else {
+//               ORDERS.set(osn, [f.priceInTicks, f.baseLotsRemaining])
+//             }
+//           }
+//           break
+//         case 'TimeInForce':
+//           break
+//         case 'Uninitialized':
+//           break
+//       }
+//     }
+//   }
+//   printOrderBook()
+//   SYNCED = true
+// }
 
 // streamMarketEvents()
 // setTimeout(syncMarket, 1000)
@@ -312,6 +296,9 @@ Bun.serve({
                   result: phoenix.symbology,
                 })
               )
+              break
+            case 'marketdata/book/l2/snapshot':
+              const params = create(parsed.params, QueryL2BookSnapshot)
               break
             default:
               ws.send(

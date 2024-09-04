@@ -30,6 +30,7 @@
       "@": ["./index.ts"],
       "@/architect": ["./architect"],
       "@/connectors": ["./connectors"],
+      "@/RingBuffer": ["./RingBuffer"],
     }
   }
 }
