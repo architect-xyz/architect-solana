@@ -1,5 +1,14 @@
 import { logger } from '@'
-import { Market, Product, Route, SymbologySnapshot, type TradeV2, Venue } from '@/architect'
+import {
+  type Decimal,
+  type L2BookSnapshot,
+  Market,
+  Product,
+  Route,
+  SymbologySnapshot,
+  type TradeV2,
+  Venue,
+} from '@/architect'
 import Big from 'big.js'
 import { Connection, PublicKey } from '@solana/web3.js'
 import * as Phoenix from '@ellipsis-labs/phoenix-sdk'
@@ -12,7 +21,11 @@ import type SubscriptionBroker from '../../SubscriptionBroker.ts'
 
 const MARKET_PUBKEY = new PublicKey('4DoNfFBfF7UokCC2FQzriy7yHK6DY6NVdYpuekQ5pRgg')
 
-export type PhoenixTradeV2 = TradeV2 & { slot: number; market_sequence_number: number }
+export type PhoenixTradeV2 = TradeV2 & {
+  slot: number
+  market_sequence_number: number
+  taker_pubkey: string
+}
 
 export default class ArchitectPhoenixConnector {
   phoenix: Phoenix.Client | null = null
@@ -23,6 +36,8 @@ export default class ArchitectPhoenixConnector {
   // and also shared index...
   symbology: SymbologySnapshot
   marketPubkeyToId: Map<string, string> = new Map()
+  marketIdToPubkey: Map<string, string> = new Map()
+  // pubkey => orderbook
   orderbooks: Map<string, PhoenixOrderbook> = new Map()
 
   protected constructor(helius_api_key: string, broker: SubscriptionBroker) {
@@ -130,6 +145,7 @@ export default class ArchitectPhoenixConnector {
       return
     }
     const newMarketPubkeyToId = new Map()
+    const newMarketIdToPubkey = new Map()
     const newSymbology = new SymbologySnapshot()
     const route = new Route({ name: 'DIRECT' })
     const venue = new Venue({ name: 'PHOENIX' })
@@ -180,20 +196,36 @@ export default class ArchitectPhoenixConnector {
       })
       newSymbology.markets.push(market)
       newMarketPubkeyToId.set(pubkey, market.id)
+      newMarketIdToPubkey.set(market.id, pubkey)
     }
     newSymbology.epoch = this.symbology.epoch
     newSymbology.seqno = this.symbology.seqno + 1
     this.symbology = newSymbology
     this.marketPubkeyToId = newMarketPubkeyToId
+    this.marketIdToPubkey = newMarketIdToPubkey
+  }
+
+  getL2Orderbook(marketId: string): L2BookSnapshot | null {
+    const pubkey = this.marketIdToPubkey.get(marketId)
+    if (!pubkey) {
+      logger.warn(`no pubkey for market ${marketId}`)
+      return null
+    }
+    const orderbook = this.orderbooks.get(pubkey)
+    if (!orderbook) {
+      logger.warn(`no orderbook for market ${marketId}`)
+      return null
+    }
+    return orderbook.getL2Orderbook()
   }
 }
 
 type PhoenixOrder = {
   priceInTicks: number
   baseLots: number
-  lastValidSlot: number
-  lastValidUnixTimestamp: number
-  makerPubkey?: string | null
+  lastValidSlot?: number
+  lastValidUnixTimestamp?: number
+  makerPubkey?: string
 }
 
 class PhoenixOrderbook {
@@ -203,7 +235,7 @@ class PhoenixOrderbook {
   synced: boolean = false
   state: Phoenix.MarketState | undefined
   msn: number | undefined
-  // orderSequenceNumber.toString() => [priceInTicks, baseLots]
+  // orderSequenceNumber.toString() => PhoenixOrder
   orders: Map<string, PhoenixOrder> = new Map()
   tradesChannel: string
 
@@ -211,6 +243,43 @@ class PhoenixOrderbook {
     this.marketId = marketId
     this.pubkey = pubkey
     this.tradesChannel = `marketdata/trades/${marketId}`
+  }
+
+  getL2Orderbook() {
+    if (!this.state) {
+      return null
+    }
+    const bids: Map<number, number> = new Map()
+    const asks: Map<number, number> = new Map()
+    for (const [osn, order] of this.orders) {
+      const msb = new BN(osn).shrn(63)
+      const pit = order.priceInTicks
+      const lot = order.baseLots
+      if (msb.isZero()) {
+        const existing = asks.get(pit)
+        asks.set(pit, existing ? existing + lot : lot)
+      } else {
+        const existing = bids.get(pit)
+        bids.set(pit, existing ? existing + lot : lot)
+      }
+    }
+    const bidLevels = Array.from(bids.entries()).sort((a, b) => b[0] - a[0])
+    const askLevels = Array.from(asks.entries()).sort((a, b) => a[0] - b[0])
+    const uiBidLevels: [Decimal, Decimal][] = bidLevels.map(([priceInTicks, baseLots]) => {
+      const uiLevel = this.state!.levelToUiLevel(priceInTicks, baseLots)
+      return [Big(uiLevel.price), Big(uiLevel.quantity)]
+    })
+    const uiAskLevels: [Decimal, Decimal][] = askLevels.map(([priceInTicks, baseLots]) => {
+      const uiLevel = this.state!.levelToUiLevel(priceInTicks, baseLots)
+      return [Big(uiLevel.price), Big(uiLevel.quantity)]
+    })
+    const snap: L2BookSnapshot = {
+      timestamp: new Date(),
+      seqno: this.msn!,
+      bids: uiBidLevels,
+      asks: uiAskLevels,
+    }
+    return snap
   }
 
   sync(phoenix: Phoenix.Client) {
@@ -267,6 +336,20 @@ class PhoenixOrderbook {
         switch (ev.__kind) {
           case 'Fill':
             for (const f of ev.fields) {
+              // update orderbook
+              const osn = f.orderSequenceNumber.toString()
+              const baseLotsRemaining = toNum(f.baseLotsRemaining)
+              if (baseLotsRemaining <= 0) {
+                this.orders.delete(osn)
+              } else {
+                const entry = this.orders.get(osn)
+                if (entry) {
+                  entry.baseLots = baseLotsRemaining
+                } else {
+                  logger.error(`partial fill for missing order ${osn}`)
+                }
+              }
+              // publish trade
               const msb = new BN(f.orderSequenceNumber).shrn(63)
               const level = this.state.levelToUiLevel(
                 toNum(f.priceInTicks),
@@ -280,9 +363,100 @@ class PhoenixOrderbook {
                 direction: msb.isZero() ? 'Buy' : 'Sell',
                 price: Big(level.price),
                 size: Big(level.quantity),
+                taker_pubkey: ix.header.signer.toString(),
               }
               broker.enqueueForPublish(this.tradesChannel, trade)
             }
+            break
+          case 'FillSummary':
+            break
+          case 'Fee':
+            break
+          case 'ExpiredOrder':
+            for (const f of ev.fields) {
+              const osn = f.orderSequenceNumber.toString()
+              const priceInTicks = toNum(f.priceInTicks)
+              const baseLotsRemoved = toNum(f.baseLotsRemoved)
+              const entry = this.orders.get(osn)
+              if (
+                entry &&
+                (entry.priceInTicks != priceInTicks || entry.baseLots != baseLotsRemoved)
+              ) {
+                logger.error(
+                  `mismatch: expected [${priceInTicks}, ${baseLotsRemoved}], but entry was ${entry}`
+                )
+              }
+              this.orders.delete(osn)
+            }
+            break
+          case 'Evict':
+            for (const f of ev.fields) {
+              const osn = f.orderSequenceNumber.toString()
+              const priceInTicks = toNum(f.priceInTicks)
+              const baseLotsEvicted = toNum(f.baseLotsEvicted)
+              const entry = this.orders.get(osn)
+              if (
+                entry &&
+                (entry.priceInTicks != priceInTicks || entry.baseLots != baseLotsEvicted)
+              ) {
+                logger.error(
+                  `mismatch: expected [${priceInTicks}, ${baseLotsEvicted}], but entry was ${entry}`
+                )
+              }
+            }
+            break
+          case 'Header':
+            break
+          case 'Place':
+            for (const f of ev.fields) {
+              const osn = f.orderSequenceNumber.toString()
+              const priceInTicks = toNum(f.priceInTicks)
+              const baseLotsPlaced = toNum(f.baseLotsPlaced)
+              if (baseLotsPlaced > 0) {
+                this.orders.set(osn, {
+                  priceInTicks,
+                  baseLots: baseLotsPlaced,
+                  makerPubkey: ix.header.signer.toString(),
+                  // NB: lastValidSlot and lastValidTimestamp set on TimeInForce event
+                })
+              }
+            }
+            break
+          case 'Reduce':
+            for (const f of ev.fields) {
+              const osn = f.orderSequenceNumber.toString()
+              const priceInTicks = toNum(f.priceInTicks)
+              const baseLotsRemaining = toNum(f.baseLotsRemaining)
+              const baseLotsRemoved = toNum(f.baseLotsRemoved)
+              const entry = this.orders.get(osn)
+              if (
+                entry &&
+                (entry.priceInTicks != priceInTicks || entry.baseLots > baseLotsRemoved)
+              ) {
+                logger.error(
+                  `mismatch: expected [${priceInTicks}, ${baseLotsRemoved}], but entry was ${entry}`
+                )
+              }
+              if (baseLotsRemaining <= 0) {
+                this.orders.delete(osn)
+              } else if (entry) {
+                entry.baseLots = baseLotsRemaining
+              }
+            }
+            break
+          case 'TimeInForce':
+            for (const f of ev.fields) {
+              const osn = f.orderSequenceNumber.toString()
+              const entry = this.orders.get(osn)
+              if (entry) {
+                entry.lastValidSlot = toNum(f.lastValidSlot)
+                entry.lastValidUnixTimestamp = toNum(f.lastValidUnixTimestampInSeconds)
+              } else {
+                logger.error(`TIF for unknown order ${osn}`)
+              }
+            }
+            break
+          case 'Uninitialized':
             break
         }
       }
