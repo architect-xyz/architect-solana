@@ -1,7 +1,9 @@
 import type { ProtocolUpdateMessage } from '@/architect'
+import type { ServerWebSocket } from 'bun'
 
 type Context = {
-  subscribers: [number, WebSocket][]
+  // [clientId, subId, ws]
+  subscribers: [number, number, ServerWebSocket<any>][]
   messages: unknown[]
 }
 
@@ -17,14 +19,35 @@ export default class SubscriptionBroker {
     return context
   }
 
-  subscribe(topic: string, id: number, ws: WebSocket) {
+  subscribe(clientId: number, topic: string, id: number, ws: ServerWebSocket<any>) {
     const context = this.getOrCreateTopic(topic)
-    context.subscribers.push([id, ws])
+    context.subscribers.push([clientId, id, ws])
+  }
+
+  unsubscribe(clientId: number, topic: string, id: number) {
+    const context = this.getOrCreateTopic(topic)
+    context.subscribers = context.subscribers.filter(
+      ([subClientId, subId, _]) => subClientId !== clientId || subId !== id
+    )
+  }
+
+  unsubscribeAll(clientId: number, topic: string) {
+    const context = this.getOrCreateTopic(topic)
+    context.subscribers = context.subscribers.filter(
+      ([subClientId, _subId, _]) => subClientId !== clientId
+    )
+  }
+
+  unsubscribeClient(clientId: number) {
+    for (const context of this.topics.values()) {
+      context.subscribers = context.subscribers.filter(
+        ([subClientId, _subId, _]) => subClientId !== clientId
+      )
+    }
   }
 
   enqueueForPublish(topic: string, message: unknown) {
     const context = this.getOrCreateTopic(topic)
-    // console.log('enqueueForPublish', topic, message)
     context.messages.push(message)
   }
 
@@ -32,14 +55,16 @@ export default class SubscriptionBroker {
     const context = this.getOrCreateTopic(topic)
     while (context.messages.length > 0) {
       const message = context.messages.shift()!
-      for (const [id, ws] of context.subscribers) {
+      for (const [_, id, ws] of context.subscribers) {
         // TODO: pre-serialize everything but the ID
         const update: ProtocolUpdateMessage = { type: 'update', id, data: message }
         ws.send(JSON.stringify(update))
       }
     }
     // prune subscribers that have disconnected
-    context.subscribers = context.subscribers.filter(([_id, ws]) => ws.readyState === ws.OPEN)
+    context.subscribers = context.subscribers.filter(
+      ([_, _id, ws]) => ws.readyState === WebSocket.OPEN
+    )
   }
 
   publishAllEnqueued() {

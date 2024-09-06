@@ -2,7 +2,7 @@ import 'dotenv/config'
 import pino from 'pino'
 import { parseArgs } from 'util'
 import { create } from 'superstruct'
-import { Connection, PublicKey } from '@solana/web3.js'
+import { Connection } from '@solana/web3.js'
 import { ProtocolMessage, QueryL2BookSnapshot } from './architect'
 import ArchitectPhoenixConnector from './connectors/phoenix'
 import SubscriptionBroker from './SubscriptionBroker.ts'
@@ -29,6 +29,7 @@ export const logger = pino({
   },
 })
 
+let NEXT_CLIENT_ID = 1
 const broker = new SubscriptionBroker()
 const port = parseInt(args.values.port ?? '8888')
 
@@ -37,12 +38,20 @@ const phoenix = await ArchitectPhoenixConnector.create(solana, HELIUS_API_KEY, b
 
 logger.info(`listening on ${args.values.host}:${port}...`)
 
-Bun.serve({
+Bun.serve<{ clientId: number }>({
   hostname: args.values.host,
   port: parseInt(args.values.port ?? '8888'),
   fetch(req, server) {
     // upgrade the request to a WebSocket
-    if (server.upgrade(req)) {
+    const clientId = NEXT_CLIENT_ID
+    NEXT_CLIENT_ID += 1
+    if (
+      server.upgrade(req, {
+        data: {
+          clientId,
+        },
+      })
+    ) {
       return // do not return a Response
     }
     return new Response('Upgrade failed', { status: 500 })
@@ -55,7 +64,29 @@ Bun.serve({
       try {
         const unsafeJson = JSON.parse(message)
         const parsed = create(unsafeJson, ProtocolMessage)
-        if (parsed.type == 'query') {
+        if (parsed.type == 'subscribe') {
+          ws.send(
+            JSON.stringify({
+              type: 'response',
+              id: parsed.id,
+              result: parsed.id,
+            })
+          )
+          broker.subscribe(ws.data.clientId, parsed.topic, parsed.id, ws)
+        } else if (parsed.type == 'unsubscribe') {
+          ws.send(
+            JSON.stringify({
+              type: 'response',
+              id: parsed.id,
+              result: parsed.id,
+            })
+          )
+          if (parsed.sub_id !== undefined) {
+            broker.unsubscribe(ws.data.clientId, parsed.topic, parsed.sub_id)
+          } else {
+            broker.unsubscribeAll(ws.data.clientId, parsed.topic)
+          }
+        } else if (parsed.type == 'query') {
           logger.info(`received query: ${parsed.method}`)
           switch (parsed.method) {
             case 'symbology/snapshot':

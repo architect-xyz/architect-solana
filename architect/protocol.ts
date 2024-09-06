@@ -33,6 +33,15 @@ export const ProtocolSubscribeMessage = object({
 
 export type ProtocolSubscribeMessage = Infer<typeof ProtocolSubscribeMessage>
 
+export const ProtocolUnsubscribeMessage = object({
+  type: literal('unsubscribe'),
+  id: number(),
+  topic: string(),
+  sub_id: optional(number()),
+})
+
+export type ProtocolUnsubscribeMessage = Infer<typeof ProtocolUnsubscribeMessage>
+
 export const ProtocolUpdateMessage = object({
   type: literal('update'),
   id: number(),
@@ -45,6 +54,7 @@ export const ProtocolMessage = union([
   ProtocolQueryMessage,
   ProtocolResponseMessage,
   ProtocolSubscribeMessage,
+  ProtocolUnsubscribeMessage,
   ProtocolUpdateMessage,
 ])
 

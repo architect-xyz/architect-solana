@@ -3,6 +3,7 @@ import { DateTime, Decimal, Dir } from './common.ts'
 
 export const L2BookSnapshot = object({
   timestamp: DateTime,
+  epoch: DateTime,
   seqno: number(),
   bids: array(tuple([Decimal, Decimal])),
   asks: array(tuple([Decimal, Decimal])),

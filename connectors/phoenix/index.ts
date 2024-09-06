@@ -43,12 +43,14 @@ export default class ArchitectPhoenixConnector {
   marketPubkeyToId: Map<string, string> = new Map()
   marketIdToPubkey: Map<string, string> = new Map()
   // pubkey => orderbook
+  epoch: Date
   orderbooks: Map<string, PhoenixOrderbook> = new Map()
 
   protected constructor(heliusApiKey: string, broker: SubscriptionBroker) {
     this.heliusApiKey = heliusApiKey
     this.broker = broker
     this.symbology = new SymbologySnapshot()
+    this.epoch = new Date()
   }
 
   static async create(
@@ -61,7 +63,7 @@ export default class ArchitectPhoenixConnector {
     t.startListener()
     t.refreshSymbology()
     for (const [marketId, marketPubkey] of t.marketIdToPubkey.entries()) {
-      t.orderbooks.set(marketPubkey, new PhoenixOrderbook(marketPubkey, marketId))
+      t.orderbooks.set(marketPubkey, new PhoenixOrderbook(marketPubkey, marketId, t.epoch))
     }
     setTimeout(() => {
       ;(async function () {
@@ -249,14 +251,16 @@ class PhoenixOrderbook {
   eventBuffer: RingBuffer<Phoenix.PhoenixEventsFromInstruction> = new RingBuffer(1000)
   synced: boolean = false
   state: Phoenix.MarketState | undefined
+  epoch: Date
   msn: number | undefined
   // orderSequenceNumber.toString() => PhoenixOrder
   orders: Map<string, PhoenixOrder> = new Map()
   tradesChannel: string
 
-  constructor(pubkey: string, marketId: string) {
+  constructor(pubkey: string, marketId: string, epoch: Date) {
     this.marketId = marketId
     this.pubkey = pubkey
+    this.epoch = epoch
     this.tradesChannel = `marketdata/trades/${marketId}`
   }
 
@@ -290,6 +294,7 @@ class PhoenixOrderbook {
     })
     const snap: L2BookSnapshot = {
       timestamp: new Date(),
+      epoch: this.epoch,
       seqno: this.msn!,
       bids: uiBidLevels,
       asks: uiAskLevels,
