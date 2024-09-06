@@ -17,11 +17,11 @@ export const QueryL2BookSnapshot = object({
 
 export type QueryL2BookSnapshot = Infer<typeof QueryL2BookSnapshot>
 
-export const TradeV2 = object({
+export const TradeV1 = object({
   time: optional(DateTime),
-  direction: Dir,
+  direction: optional(Dir),
   price: Decimal,
   size: Decimal,
 })
 
-export type TradeV2 = Infer<typeof TradeV2>
+export type TradeV1 = Infer<typeof TradeV1>

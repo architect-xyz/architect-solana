@@ -6,7 +6,7 @@ import {
   Product,
   Route,
   SymbologySnapshot,
-  type TradeV2,
+  type TradeV1,
   Venue,
 } from '@/architect'
 import Big from 'big.js'
@@ -26,7 +26,7 @@ const TRACE_SLOT_DIFF = false
 // const MARKET_PUBKEY = new PublicKey('9JXE9RZskL63ZySYo3xDPnqbhCbXHkLQH4E5Xh7UDekk')
 // const MARKET_PUBKEY = new PublicKey('8BV6rrWsUabnTDA3dE6A69oUDJAj3hMhtBHTJyXB7czp')
 
-export type PhoenixTradeV2 = TradeV2 & {
+export type PhoenixTradeV2 = TradeV1 & {
   slot: number
   market_sequence_number: number
   taker_pubkey: string

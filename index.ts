@@ -23,7 +23,6 @@ const args = parseArgs({
 export const logger = pino({
   name: 'architect-solana',
   level: 'debug',
-  // TODO: only for dev
   transport: {
     target: 'pino-pretty',
   },
@@ -65,6 +64,7 @@ Bun.serve<{ clientId: number }>({
         const unsafeJson = JSON.parse(message)
         const parsed = create(unsafeJson, ProtocolMessage)
         if (parsed.type == 'subscribe') {
+          logger.info(`received subscribe: ${parsed.topic}`)
           ws.send(
             JSON.stringify({
               type: 'response',
