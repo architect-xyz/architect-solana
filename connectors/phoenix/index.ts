@@ -10,7 +10,7 @@ import {
   Venue,
 } from '@/architect'
 import Big from 'big.js'
-import { Connection, PublicKey } from '@solana/web3.js'
+import { Connection } from '@solana/web3.js'
 import * as Phoenix from '@ellipsis-labs/phoenix-sdk'
 import { create } from 'superstruct'
 import { TransactionSubscriptionNotification } from '../../types.ts'
@@ -18,8 +18,13 @@ import { RingBuffer } from '@/RingBuffer'
 import { toNum } from '@ellipsis-labs/phoenix-sdk'
 import BN from 'bn.js'
 import type SubscriptionBroker from '../../SubscriptionBroker.ts'
+import type { bignum } from '@metaplex-foundation/beet'
 
-const MARKET_PUBKEY = new PublicKey('4DoNfFBfF7UokCC2FQzriy7yHK6DY6NVdYpuekQ5pRgg')
+const TRACE_SLOT_DIFF = false
+
+// const MARKET_PUBKEY = new PublicKey('4DoNfFBfF7UokCC2FQzriy7yHK6DY6NVdYpuekQ5pRgg')
+// const MARKET_PUBKEY = new PublicKey('9JXE9RZskL63ZySYo3xDPnqbhCbXHkLQH4E5Xh7UDekk')
+// const MARKET_PUBKEY = new PublicKey('8BV6rrWsUabnTDA3dE6A69oUDJAj3hMhtBHTJyXB7czp')
 
 export type PhoenixTradeV2 = TradeV2 & {
   slot: number
@@ -30,7 +35,7 @@ export type PhoenixTradeV2 = TradeV2 & {
 export default class ArchitectPhoenixConnector {
   phoenix: Phoenix.Client | null = null
   socket: WebSocket | null = null
-  helius_api_key: string
+  heliusApiKey: string
   broker: SubscriptionBroker
   // TODO: probably want to share symbology via snapshot merge with other connectors
   // and also shared index...
@@ -40,24 +45,24 @@ export default class ArchitectPhoenixConnector {
   // pubkey => orderbook
   orderbooks: Map<string, PhoenixOrderbook> = new Map()
 
-  protected constructor(helius_api_key: string, broker: SubscriptionBroker) {
-    this.helius_api_key = helius_api_key
+  protected constructor(heliusApiKey: string, broker: SubscriptionBroker) {
+    this.heliusApiKey = heliusApiKey
     this.broker = broker
     this.symbology = new SymbologySnapshot()
   }
 
   static async create(
     solana: Connection,
-    helius_api_key: string,
+    heliusApiKey: string,
     broker: SubscriptionBroker
   ): Promise<ArchitectPhoenixConnector> {
-    const t = new ArchitectPhoenixConnector(helius_api_key, broker)
+    const t = new ArchitectPhoenixConnector(heliusApiKey, broker)
     t.phoenix = await Phoenix.Client.create(solana)
     t.startListener()
     t.refreshSymbology()
-    const marketPubkey = MARKET_PUBKEY.toString()
-    const MARKET_ID = t.marketPubkeyToId.get(marketPubkey)!
-    t.orderbooks.set(marketPubkey, new PhoenixOrderbook(marketPubkey, MARKET_ID))
+    for (const [marketId, marketPubkey] of t.marketIdToPubkey.entries()) {
+      t.orderbooks.set(marketPubkey, new PhoenixOrderbook(marketPubkey, marketId))
+    }
     setTimeout(() => {
       ;(async function () {
         logger.info('snapshot refresh all markets...')
@@ -77,7 +82,8 @@ export default class ArchitectPhoenixConnector {
   startListener() {
     logger.info('Starting Helius websocket')
     const broker = this.broker
-    this.socket = new WebSocket(`wss://atlas-mainnet.helius-rpc.com?api-key=${this.helius_api_key}`)
+    let lastSlot = 0
+    this.socket = new WebSocket(`wss://atlas-mainnet.helius-rpc.com?api-key=${this.heliusApiKey}`)
     this.socket.addEventListener('open', () => {
       logger.info('Helius websocket connected')
       this.socket?.send(
@@ -89,8 +95,8 @@ export default class ArchitectPhoenixConnector {
             {
               vote: false,
               failed: false,
-              accountInclude: [MARKET_PUBKEY.toString()],
-              // accountInclude: [Phoenix.PROGRAM_ID],
+              // accountInclude: [MARKET_PUBKEY.toString()],
+              accountInclude: [Phoenix.PROGRAM_ID],
             },
             {
               commitment: 'confirmed',
@@ -117,9 +123,14 @@ export default class ArchitectPhoenixConnector {
         const unsafeRes = JSON.parse(event.data)
         const res = create(unsafeRes, TransactionSubscriptionNotification)
         if ('params' in res && res.params.result) {
+          const slot = res.params.result.slot
+          if (slot != lastSlot) {
+            logger.debug(`finished slot ${lastSlot}, now at ${slot}`)
+            lastSlot = slot
+          }
           const decoded = Phoenix.getPhoenixEventsFromTransactionData({
             ...res.params.result.transaction,
-            slot: res.params.result.slot,
+            slot,
           })
           for (const ix of decoded.instructions) {
             const pubkey = ix.header.market.toString()
@@ -228,6 +239,10 @@ type PhoenixOrder = {
   makerPubkey?: string
 }
 
+function osnToDir(osn: bignum): 'Buy' | 'Sell' {
+  return new BN(osn).shrn(63).isZero() ? 'Sell' : 'Buy'
+}
+
 class PhoenixOrderbook {
   marketId: string
   pubkey: string
@@ -311,6 +326,13 @@ class PhoenixOrderbook {
         makerPubkey: state.data.traderIndexToTraderPubkey.get(toNum(order.traderIndex)),
       })
     }
+    if (TRACE_SLOT_DIFF) {
+      console.log('---')
+      console.log('> snapshot')
+      for (const [osn, o] of this.orders.entries()) {
+        console.log(osn, o.priceInTicks, o.baseLots)
+      }
+    }
     this.synced = true
   }
 
@@ -319,11 +341,39 @@ class PhoenixOrderbook {
       throw new Error('BUG: state or msn is undefined')
     }
     this.synced = false
+    let lastSlot = 0
+    let maxSlot = 0 // latest slot seen in event buffer
+    let maxTsn = 0 // latest unix timestamp seen in event buffer
+    let slotDiffBids: Map<number, number> = new Map() // priceInTicks => diff in base lots
+    let slotDiffAsks: Map<number, number> = new Map()
+    const state = this.state
+    function printSlotDiff() {
+      for (const [priceInTicks, diffBaseLots] of slotDiffBids.entries()) {
+        const u = state.levelToUiLevel(priceInTicks, diffBaseLots)
+        console.log('chg bid ', u.price, u.quantity)
+      }
+      for (const [priceInTicks, diffBaseLots] of slotDiffAsks.entries()) {
+        const u = state.levelToUiLevel(priceInTicks, diffBaseLots)
+        console.log('chg ask ', u.price, u.quantity)
+      }
+    }
     while (!this.eventBuffer.isEmpty()) {
       const ix = this.eventBuffer.removeFirst()
       const slot = toNum(ix.header.slot)
+      if (TRACE_SLOT_DIFF) {
+        if (slot != lastSlot) {
+          console.log('---')
+          console.log('> at slot', slot)
+          printSlotDiff()
+          slotDiffBids.clear()
+          slotDiffAsks.clear()
+        }
+      }
+      lastSlot = slot
+      maxSlot = Math.max(maxSlot, slot)
       const sn = toNum(ix.header.sequenceNumber)
       const ts = new Date(toNum(ix.header.timestamp) * 1000)
+      maxTsn = Math.max(maxTsn, toNum(ix.header.timestamp))
       if (sn <= this.msn) {
         continue
       }
@@ -338,8 +388,23 @@ class PhoenixOrderbook {
             for (const f of ev.fields) {
               // update orderbook
               const osn = f.orderSequenceNumber.toString()
+              const priceInTicks = toNum(f.priceInTicks)
+              const baseLotsFilled = toNum(f.baseLotsFilled)
               const baseLotsRemaining = toNum(f.baseLotsRemaining)
+              if (TRACE_SLOT_DIFF) {
+                console.log('fill', osn, priceInTicks, baseLotsFilled, baseLotsRemaining)
+                if (osnToDir(f.orderSequenceNumber) == 'Buy') {
+                  const entry = slotDiffBids.get(priceInTicks) ?? 0
+                  slotDiffBids.set(priceInTicks, entry - baseLotsFilled)
+                } else {
+                  const entry = slotDiffAsks.get(priceInTicks) ?? 0
+                  slotDiffAsks.set(priceInTicks, entry - baseLotsFilled)
+                }
+              }
               if (baseLotsRemaining <= 0) {
+                if (!this.orders.has(osn)) {
+                  logger.error(`fill for missing order ${osn}`)
+                }
                 this.orders.delete(osn)
               } else {
                 const entry = this.orders.get(osn)
@@ -377,6 +442,13 @@ class PhoenixOrderbook {
               const osn = f.orderSequenceNumber.toString()
               const priceInTicks = toNum(f.priceInTicks)
               const baseLotsRemoved = toNum(f.baseLotsRemoved)
+              if (TRACE_SLOT_DIFF) {
+                console.log('expired', osn, priceInTicks, baseLotsRemoved)
+                const slotDiff =
+                  osnToDir(f.orderSequenceNumber) == 'Buy' ? slotDiffBids : slotDiffAsks
+                const slotEntry = slotDiff.get(priceInTicks) ?? 0
+                slotDiff.set(priceInTicks, slotEntry - baseLotsRemoved)
+              }
               const entry = this.orders.get(osn)
               if (
                 entry &&
@@ -394,6 +466,13 @@ class PhoenixOrderbook {
               const osn = f.orderSequenceNumber.toString()
               const priceInTicks = toNum(f.priceInTicks)
               const baseLotsEvicted = toNum(f.baseLotsEvicted)
+              if (TRACE_SLOT_DIFF) {
+                console.log('evict', osn, priceInTicks, baseLotsEvicted)
+                const slotDiff =
+                  osnToDir(f.orderSequenceNumber) == 'Buy' ? slotDiffBids : slotDiffAsks
+                const slotEntry = slotDiff.get(priceInTicks) ?? 0
+                slotDiff.set(priceInTicks, slotEntry - baseLotsEvicted)
+              }
               const entry = this.orders.get(osn)
               if (
                 entry &&
@@ -412,6 +491,13 @@ class PhoenixOrderbook {
               const osn = f.orderSequenceNumber.toString()
               const priceInTicks = toNum(f.priceInTicks)
               const baseLotsPlaced = toNum(f.baseLotsPlaced)
+              if (TRACE_SLOT_DIFF) {
+                console.log('place', osn, priceInTicks, baseLotsPlaced)
+                const slotDiff =
+                  osnToDir(f.orderSequenceNumber) == 'Buy' ? slotDiffBids : slotDiffAsks
+                const slotEntry = slotDiff.get(priceInTicks) ?? 0
+                slotDiff.set(priceInTicks, slotEntry + baseLotsPlaced)
+              }
               if (baseLotsPlaced > 0) {
                 this.orders.set(osn, {
                   priceInTicks,
@@ -428,6 +514,13 @@ class PhoenixOrderbook {
               const priceInTicks = toNum(f.priceInTicks)
               const baseLotsRemaining = toNum(f.baseLotsRemaining)
               const baseLotsRemoved = toNum(f.baseLotsRemoved)
+              if (TRACE_SLOT_DIFF) {
+                console.log('reduce', osn, priceInTicks, baseLotsRemaining, baseLotsRemoved)
+                const slotDiff =
+                  osnToDir(f.orderSequenceNumber) == 'Buy' ? slotDiffBids : slotDiffAsks
+                const slotEntry = slotDiff.get(priceInTicks) ?? 0
+                slotDiff.set(priceInTicks, slotEntry - baseLotsRemoved)
+              }
               const entry = this.orders.get(osn)
               if (
                 entry &&
@@ -460,6 +553,38 @@ class PhoenixOrderbook {
             break
         }
       }
+      // prune orders that are past the latest tsn
+      const pruneOsns = []
+      for (const [osn, order] of this.orders) {
+        if (order.lastValidUnixTimestamp && order.lastValidUnixTimestamp < maxTsn) {
+          if (TRACE_SLOT_DIFF) {
+            console.log('prune for ts', osn, order.lastValidUnixTimestamp, maxTsn)
+          }
+          pruneOsns.push(osn)
+        }
+        if (order.lastValidSlot && order.lastValidSlot < maxSlot) {
+          if (TRACE_SLOT_DIFF) {
+            console.log('prune for slot', osn, order.lastValidSlot, maxSlot)
+          }
+          pruneOsns.push(osn)
+        }
+      }
+      for (const osn of pruneOsns) {
+        if (TRACE_SLOT_DIFF) {
+          const entry = this.orders.get(osn)
+          if (entry) {
+            const slotDiff = osnToDir(new BN(osn)) == 'Buy' ? slotDiffBids : slotDiffAsks
+            const slotEntry = slotDiff.get(entry.priceInTicks) ?? 0
+            slotDiff.set(entry.priceInTicks, slotEntry - entry.baseLots)
+          }
+        }
+        this.orders.delete(osn)
+      }
+    }
+    if (TRACE_SLOT_DIFF) {
+      console.log('---')
+      console.log('> post slot', lastSlot)
+      printSlotDiff()
     }
     this.synced = true
   }

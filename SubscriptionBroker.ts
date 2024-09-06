@@ -24,7 +24,7 @@ export default class SubscriptionBroker {
 
   enqueueForPublish(topic: string, message: unknown) {
     const context = this.getOrCreateTopic(topic)
-    console.log('enqueueForPublish', topic, message)
+    // console.log('enqueueForPublish', topic, message)
     context.messages.push(message)
   }
 
