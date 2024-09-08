@@ -8,6 +8,8 @@ bun install
 
 To run:
 
+Copy `.env.example` to `.env` and fill in the required values.
+
 ```bash
 bun run index.ts
 ```
