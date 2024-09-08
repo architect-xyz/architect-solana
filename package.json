@@ -6,6 +6,7 @@
   "dependencies": {
     "@ellipsis-labs/phoenix-sdk": "^2.0.3",
     "@metaplex-foundation/beet": "^0.7.2",
+    "@sentry/bun": "^8.28.0",
     "@solana/web3.js": "^1.95.3",
     "big.js": "^6.2.1",
     "bn.js": "^5.2.1",

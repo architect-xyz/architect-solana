@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import pino from 'pino'
+import * as Sentry from '@sentry/bun'
 import { parseArgs } from 'util'
 import { create } from 'superstruct'
 import { Connection } from '@solana/web3.js'
@@ -10,6 +11,9 @@ import SubscriptionBroker from './SubscriptionBroker.ts'
 const WSS_ENDPOINT = process.env['WSS_ENDPOINT']!
 const HTTP_ENDPOINT = process.env['HTTP_ENDPOINT']!
 const HELIUS_API_KEY = process.env['HELIUS_API_KEY']!
+
+// set variables SENTRY_DSN, SENTRY_ENVIRONMENT
+Sentry.init({ tracesSampleRate: 1.0 })
 
 const args = parseArgs({
   args: Bun.argv,
