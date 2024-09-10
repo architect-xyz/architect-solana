@@ -51,6 +51,9 @@ export class Server {
         return new Response('Upgrade failed', { status: 500 })
       },
       websocket: {
+        close(ws, _code, _reason) {
+          self.broker.unsubscribeClient(ws.data.clientId)
+        },
         message(ws, message) {
           // try to parse message as utf8
           let decoded = null
