@@ -1,5 +1,15 @@
 import { array, type Infer, number, object, optional, string, tuple } from 'superstruct'
-import { DateTime, Decimal, Dir } from './common.ts'
+import { DateTime, Decimal, Dir } from './common'
+
+export const L1BookSnapshot = object({
+  timestamp: DateTime,
+  epoch: DateTime,
+  seqno: number(),
+  best_bid: optional(tuple([Decimal, Decimal])),
+  best_ask: optional(tuple([Decimal, Decimal])),
+})
+
+export type L1BookSnapshot = Infer<typeof L1BookSnapshot>
 
 export const L2BookSnapshot = object({
   timestamp: DateTime,

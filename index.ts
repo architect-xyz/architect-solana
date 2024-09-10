@@ -4,7 +4,8 @@ import * as Sentry from '@sentry/bun'
 import { parseArgs } from 'util'
 import { create } from 'superstruct'
 import { Connection } from '@solana/web3.js'
-import { ProtocolMessage, QueryL2BookSnapshot } from './architect'
+import * as Architect from './architect'
+import { QueryL2BookSnapshot } from './architect'
 import ArchitectPhoenixConnector from './connectors/phoenix'
 import SubscriptionBroker from './SubscriptionBroker.ts'
 
@@ -32,111 +33,24 @@ export const logger = pino({
   },
 })
 
-let NEXT_CLIENT_ID = 1
 const broker = new SubscriptionBroker()
 const port = parseInt(args.values.port ?? '8888')
+const architect = new Architect.Server(args.values.host ?? 'localhost', port, broker)
 
 const solana = new Connection(HTTP_ENDPOINT, { wsEndpoint: WSS_ENDPOINT })
 const phoenix = await ArchitectPhoenixConnector.create(solana, HELIUS_API_KEY, broker)
 
-logger.info(`listening on ${args.values.host}:${port}...`)
+architect.rpc('symbology/snapshot', () => ({ result: phoenix.symbology }))
 
-Bun.serve<{ clientId: number }>({
-  hostname: args.values.host,
-  port: parseInt(args.values.port ?? '8888'),
-  fetch(req, server) {
-    // upgrade the request to a WebSocket
-    const clientId = NEXT_CLIENT_ID
-    NEXT_CLIENT_ID += 1
-    if (
-      server.upgrade(req, {
-        data: {
-          clientId,
-        },
-      })
-    ) {
-      return // do not return a Response
-    }
-    return new Response('Upgrade failed', { status: 500 })
-  },
-  websocket: {
-    message(ws, message) {
-      if (typeof message !== 'string') {
-        return
-      }
-      try {
-        const unsafeJson = JSON.parse(message)
-        const parsed = create(unsafeJson, ProtocolMessage)
-        if (parsed.type == 'subscribe') {
-          logger.info(`received subscribe: ${parsed.topic}`)
-          ws.send(
-            JSON.stringify({
-              type: 'response',
-              id: parsed.id,
-              result: parsed.id,
-            })
-          )
-          broker.subscribe(ws.data.clientId, parsed.topic, parsed.id, ws)
-        } else if (parsed.type == 'unsubscribe') {
-          ws.send(
-            JSON.stringify({
-              type: 'response',
-              id: parsed.id,
-              result: parsed.id,
-            })
-          )
-          if (parsed.sub_id !== undefined) {
-            broker.unsubscribe(ws.data.clientId, parsed.topic, parsed.sub_id)
-          } else {
-            broker.unsubscribeAll(ws.data.clientId, parsed.topic)
-          }
-        } else if (parsed.type == 'query') {
-          logger.info(`received query: ${parsed.method}`)
-          switch (parsed.method) {
-            case 'symbology/snapshot':
-              ws.send(
-                JSON.stringify({
-                  type: 'response',
-                  id: parsed.id,
-                  result: phoenix.symbology,
-                })
-              )
-              break
-            case 'marketdata/book/l2/snapshot':
-              const params = create(parsed.params, QueryL2BookSnapshot)
-              const snapshot = phoenix.getL2Orderbook(params.market_id)
-              if (snapshot !== null) {
-                ws.send(
-                  JSON.stringify({
-                    type: 'response',
-                    id: parsed.id,
-                    result: snapshot,
-                  })
-                )
-              } else {
-                ws.send(
-                  JSON.stringify({
-                    type: 'response',
-                    id: parsed.id,
-                    error: { code: -32000, message: 'orderbook snapshot not found' },
-                  })
-                )
-              }
-              break
-            default:
-              ws.send(
-                JSON.stringify({
-                  type: 'response',
-                  id: parsed.id,
-                  error: { code: -32601, message: 'method not found' },
-                })
-              )
-              break
-          }
-        }
-      } catch (err) {
-        logger.error(`while handling ws message: ${err}`)
-      }
-    },
-  },
+architect.rpc('marketdata/book/l2/snapshot', (params) => {
+  const parsed = create(params, QueryL2BookSnapshot)
+  const snapshot = phoenix.getL2Orderbook(parsed.market_id)
+  if (snapshot !== null) {
+    return { result: snapshot }
+  } else {
+    return { error: { code: -32000, message: 'orderbook snapshot not found' } }
+  }
 })
+
+logger.info(`listening on ${args.values.host}:${port}...`)
+architect.serve()
