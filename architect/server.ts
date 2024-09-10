@@ -52,11 +52,18 @@ export class Server {
       },
       websocket: {
         message(ws, message) {
-          if (typeof message !== 'string') {
+          // try to parse message as utf8
+          let decoded = null
+          if (typeof message === 'string') {
+            decoded = message
+          } else {
+            decoded = message.toString()
+          }
+          if (decoded === null) {
             return
           }
           try {
-            const unsafeJson = JSON.parse(message)
+            const unsafeJson = JSON.parse(decoded)
             const parsed = create(unsafeJson, ProtocolMessage)
             if (parsed.type == 'subscribe') {
               logger.info(`received subscribe: ${parsed.topic}`)
