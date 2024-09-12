@@ -2,6 +2,8 @@ import { logger } from '@'
 import {
   type Decimal,
   type L2BookSnapshot,
+  type L3BookSnapshot,
+  type L3Order,
   Market,
   Product,
   Route,
@@ -26,10 +28,17 @@ const TRACE_SLOT_DIFF = false
 // const MARKET_PUBKEY = new PublicKey('9JXE9RZskL63ZySYo3xDPnqbhCbXHkLQH4E5Xh7UDekk')
 // const MARKET_PUBKEY = new PublicKey('8BV6rrWsUabnTDA3dE6A69oUDJAj3hMhtBHTJyXB7czp')
 
-export type PhoenixTradeV2 = TradeV1 & {
+export type PhoenixTrade = TradeV1 & {
   slot: number
   market_sequence_number: number
   taker_pubkey: string
+}
+
+export type PhoenixL3Order = L3Order & {
+  order_sequence_number: number
+  last_valid_slot?: number
+  last_valid_unix_timestamp?: number
+  maker_pubkey?: string
 }
 
 export default class ArchitectPhoenixConnector {
@@ -231,6 +240,20 @@ export default class ArchitectPhoenixConnector {
     }
     return orderbook.getL2Orderbook()
   }
+
+  getL3Orderbook(marketId: string): L3BookSnapshot | null {
+    const pubkey = this.marketIdToPubkey.get(marketId)
+    if (!pubkey) {
+      logger.warn(`no pubkey for market ${marketId}`)
+      return null
+    }
+    const orderbook = this.orderbooks.get(pubkey)
+    if (!orderbook) {
+      logger.warn(`no orderbook for market ${marketId}`)
+      return null
+    }
+    return orderbook.getL3Orderbook()
+  }
 }
 
 type PhoenixOrder = {
@@ -298,6 +321,46 @@ class PhoenixOrderbook {
       seqno: this.msn!,
       bids: uiBidLevels,
       asks: uiAskLevels,
+    }
+    return snap
+  }
+
+  getL3Orderbook() {
+    if (!this.state) {
+      return null
+    }
+    const bids: PhoenixL3Order[] = []
+    const asks: PhoenixL3Order[] = []
+    for (const [osn, order] of this.orders) {
+      const bosn = new BN(osn)
+      const msb = bosn.shrn(63)
+      const ul = this.state.levelToUiLevel(order.priceInTicks, order.baseLots)
+      const l3Order: PhoenixL3Order = {
+        order_sequence_number: (msb.isZero() ? bosn : bosn.notn(64)).toNumber(),
+        price: Big(ul.price),
+        size: Big(ul.quantity),
+        last_valid_slot: order.lastValidSlot,
+        last_valid_unix_timestamp: order.lastValidUnixTimestamp,
+        maker_pubkey: order.makerPubkey,
+      }
+      if (msb.isZero()) {
+        bids.push(l3Order)
+      } else {
+        asks.push(l3Order)
+      }
+    }
+    // sort bids and asks by price, then order sequence number
+    function compare(a: PhoenixL3Order, b: PhoenixL3Order) {
+      return a.price.cmp(b.price) || a.order_sequence_number - b.order_sequence_number
+    }
+    bids.sort(compare)
+    asks.sort(compare)
+    const snap: L3BookSnapshot = {
+      timestamp: new Date(),
+      epoch: this.epoch,
+      seqno: this.msn!,
+      bids,
+      asks,
     }
     return snap
   }
@@ -425,7 +488,7 @@ class PhoenixOrderbook {
                 toNum(f.priceInTicks),
                 toNum(f.baseLotsFilled)
               )
-              const trade: PhoenixTradeV2 = {
+              const trade: PhoenixTrade = {
                 time: ts,
                 slot,
                 market_sequence_number: sn,
@@ -435,6 +498,7 @@ class PhoenixOrderbook {
                 size: Big(level.quantity),
                 taker_pubkey: ix.header.signer.toString(),
               }
+              logger.debug(`market=${this.marketId} trade=${JSON.stringify(trade)}`)
               broker.enqueueForPublish(this.tradesChannel, trade)
             }
             break

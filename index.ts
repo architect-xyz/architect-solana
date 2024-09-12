@@ -5,7 +5,7 @@ import { parseArgs } from 'util'
 import { create } from 'superstruct'
 import { Connection } from '@solana/web3.js'
 import * as Architect from './architect'
-import { QueryL2BookSnapshot } from './architect'
+import { QueryL2BookSnapshot, QueryL3BookSnapshot } from './architect'
 import ArchitectPhoenixConnector from './connectors/phoenix'
 import SubscriptionBroker from './SubscriptionBroker.ts'
 
@@ -45,6 +45,16 @@ architect.rpc('symbology/snapshot', () => ({ result: phoenix.symbology }))
 architect.rpc('marketdata/book/l2/snapshot', (params) => {
   const parsed = create(params, QueryL2BookSnapshot)
   const snapshot = phoenix.getL2Orderbook(parsed.market_id)
+  if (snapshot !== null) {
+    return { result: snapshot }
+  } else {
+    return { error: { code: -32000, message: 'orderbook snapshot not found' } }
+  }
+})
+
+architect.rpc('marketdata/book/l3/snapshot', (params) => {
+  const parsed = create(params, QueryL3BookSnapshot)
+  const snapshot = phoenix.getL3Orderbook(parsed.market_id)
   if (snapshot !== null) {
     return { result: snapshot }
   } else {

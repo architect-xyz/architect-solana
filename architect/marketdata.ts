@@ -27,6 +27,29 @@ export const QueryL2BookSnapshot = object({
 
 export type QueryL2BookSnapshot = Infer<typeof QueryL2BookSnapshot>
 
+export const L3Order = object({
+  price: Decimal,
+  size: Decimal,
+})
+
+export type L3Order = Infer<typeof L3Order>
+
+export const L3BookSnapshot = object({
+  timestamp: DateTime,
+  epoch: DateTime,
+  seqno: number(),
+  bids: array(L3Order),
+  asks: array(L3Order),
+})
+
+export type L3BookSnapshot = Infer<typeof L3BookSnapshot>
+
+export const QueryL3BookSnapshot = object({
+  market_id: string(),
+})
+
+export type QueryL3BookSnapshot = Infer<typeof QueryL3BookSnapshot>
+
 export const TradeV1 = object({
   time: optional(DateTime),
   direction: optional(Dir),
